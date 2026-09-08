@@ -14,20 +14,36 @@ from telegram.ext import MessageHandler, filters
 from leavenowbot.app import Bot, links
 from leavenowbot.model import Trip
 from leavenowbot.routes import Route, RouteUnavailable
-from leavenowbot.store import Store
+
+
+class MemoryStore:
+    def __init__(self):
+        self.data = {}
+
+    async def get(self, chat_id):
+        trip = self.data.get(chat_id)
+        return Trip(**trip.to_dict()) if trip else None
+
+    async def save(self, trip):
+        self.data[trip.chat_id] = Trip(**trip.to_dict())
+
+    async def delete(self, chat_id):
+        self.data.pop(chat_id, None)
+
+    def peek(self, chat_id):
+        return self.data.get(chat_id)
 
 
 @pytest.fixture
-def rig(tmp_path):
-    store = Store(str(tmp_path / "state.sqlite3"))
+def rig():
+    store = MemoryStore()
     api = SimpleNamespace(
         send_message=AsyncMock(return_value=SimpleNamespace(message_id=100)),
         edit_message_text=AsyncMock(),
     )
     routes = SimpleNamespace(calculate=AsyncMock())
     bot = Bot(store, routes, {1}, ZoneInfo("Europe/London"))
-    yield bot, routes, api, SimpleNamespace(bot=api)
-    store.close()
+    return bot, routes, api, SimpleNamespace(bot=api)
 
 
 def update(api, message_id=1, user=1, edited=False, chat_type="private", **fields):
@@ -73,17 +89,17 @@ def test_pin_time_live_location_edit_and_cancel(rig):
     async def run():
         pin = update(api, location={"latitude": 51.47, "longitude": -0.45})
         await bot.location(pin, context)
-        assert bot.store.get(1).phase == "time"
+        assert (await bot.store.get(1)).phase == "time"
         assert "Europe/London" in messages(api)[-1]
         tomorrow = (datetime.now(UTC) + timedelta(days=1)).strftime("%Y-%m-%d 18:30")
         await bot.arrival(update(api, 2, text=tomorrow), context)
-        assert bot.store.get(1).phase == "tracking"
+        assert (await bot.store.get(1)).phase == "tracking"
         assert "Waiting for your location" in messages(api)[-1]
         live = update(api, 3, location={"latitude": 51.5, "longitude": -0.12, "live_period": 3600})
         await bot.location(live, context)
         assert routes.calculate.await_count == 1
-        assert bot.store.get(1).latitude == 51.47  # Destination wasn't overwritten by origin.
-        assert bot.store.get(1).origin_lat == 51.5
+        assert (await bot.store.get(1)).latitude == 51.47  # Destination wasn't overwritten.
+        assert (await bot.store.get(1)).origin_lat == 51.5
         edited = update(
             api,
             3,
@@ -93,12 +109,12 @@ def test_pin_time_live_location_edit_and_cancel(rig):
         )
         assert MessageHandler(filters.LOCATION, bot.location).check_update(edited)
         await bot.location(edited, context)
-        assert bot.store.get(1).origin_lat == 51.501
+        assert (await bot.store.get(1)).origin_lat == 51.501
         assert routes.calculate.await_count == 1  # GPS changes don't hammer Google.
         await bot.command(update(api, 4, text="/cancel"), context)
-        assert bot.store.get(1) is None
+        assert await bot.store.get(1) is None
         await bot.location(edited, context)  # Late edits cannot recreate cancelled tracking.
-        assert bot.store.get(1) is None
+        assert await bot.store.get(1) is None
 
     asyncio.run(run())
 
@@ -116,7 +132,7 @@ def test_unauthorized_users_and_groups_are_ignored(rig, user, chat_type):
         await bot.arrival(update(api, user=user, chat_type=chat_type, text="18:30"), context)
 
     asyncio.run(run())
-    assert not bot.store.all()
+    assert not bot.store.data
     api.send_message.assert_not_awaited()
     routes.calculate.assert_not_awaited()
 
@@ -139,7 +155,7 @@ def test_venue_pin_and_invalid_time_leave_draft_intact(rig):
         await bot.arrival(update(api, 2, text="not a time"), context)
 
     asyncio.run(run())
-    trip = bot.store.get(1)
+    trip = bot.store.peek(1)
     assert trip.phase == "time" and trip.label == "Station"
     routes.calculate.assert_not_awaited()
 
@@ -147,7 +163,7 @@ def test_venue_pin_and_invalid_time_leave_draft_intact(rig):
 def test_old_live_sessions_and_out_of_order_edits_are_ignored(rig):
     bot, _, api, context = rig
     now = time.time()
-    bot.store.save(active(now, location_message_id=10, attempted_at=now))
+    bot.store.data[1] = active(now, location_message_id=10, attempted_at=now)
 
     async def run():
         for message_id, edit_date in [(9, int(now) + 1), (10, int(now) - 1)]:
@@ -163,7 +179,7 @@ def test_old_live_sessions_and_out_of_order_edits_are_ignored(rig):
             )
 
     asyncio.run(run())
-    assert bot.store.get(1).origin_lat == 51.5
+    assert bot.store.peek(1).origin_lat == 51.5
     api.send_message.assert_not_awaited()
 
 
@@ -185,14 +201,14 @@ def test_thresholds_are_inclusive_and_not_repeated_after_reload(rig):
         assert not any(t.startswith("🟡") for t in messages(api))
         await bot.refresh(api, trip, now + 1)
         assert sum(t.startswith("🟡") for t in messages(api)) == 1
-        await bot.refresh(api, bot.store.get(1), now + 2)
-        await bot.refresh(api, bot.store.get(1), now + 901)
-        await bot.refresh(api, bot.store.get(1), now + 930)
+        await bot.refresh(api, await bot.store.get(1), now + 2)
+        await bot.refresh(api, await bot.store.get(1), now + 901)
+        await bot.refresh(api, await bot.store.get(1), now + 930)
 
     asyncio.run(run())
     assert sum(t.startswith("🟡") for t in messages(api)) == 1
     assert sum(t.startswith("🔴 LEAVE NOW") for t in messages(api)) == 1
-    assert bot.store.get(1).alert_level == 2
+    assert bot.store.peek(1).alert_level == 2
     assert api.edit_message_text.await_count >= 2
     # Stale GPS; deadline alert still fires from cached route.
     routes.calculate.assert_not_awaited()
@@ -210,12 +226,12 @@ def test_timer_reroutes_when_stationary(rig, monkeypatch):
         leave_at=now + 1800,
         arrive_at=now + 4000,
     )
-    bot.store.save(trip)
+    bot.store.data[1] = trip
     routes.calculate.return_value = Route(now + 600, now + 4000, "Earlier train")
     monkeypatch.setattr("leavenowbot.app.time.time", lambda: now)
-    asyncio.run(bot.tick(context))
+    asyncio.run(bot.tick(api, 1))
     routes.calculate.assert_awaited_once()
-    assert bot.store.get(1).leave_at == now + 600
+    assert bot.store.peek(1).leave_at == now + 600
     assert any(t.startswith("🟡") for t in messages(api))
 
 
@@ -245,14 +261,14 @@ def test_stopped_and_indefinite_live_location(rig, period, timedelta_mode, monke
     monkeypatch.setenv("PTB_TIMEDELTA", timedelta_mode)
     bot, _, api, context = rig
     now = int(time.time())
-    bot.store.save(active(now, attempted_at=now, location_message_id=10))
+    bot.store.data[1] = active(now, attempted_at=now, location_message_id=10)
     location = {"latitude": 51.5, "longitude": -0.12}
     if period:
         location["live_period"] = period
     asyncio.run(
         bot.location(update(api, 10, edited=True, edit_date=now, location=location), context)
     )
-    trip = bot.store.get(1)
+    trip = bot.store.peek(1)
     assert trip.stale(now) == (period is None)
 
 
@@ -265,22 +281,22 @@ def test_deleted_status_is_recreated_and_failed_alert_is_retried(rig):
         api.send_message.side_effect = NetworkError("offline")
         with pytest.raises(NetworkError):
             await bot.refresh(api, trip, now)
-        assert bot.store.get(1).alert_level == 0
+        assert bot.store.peek(1).alert_level == 0
         api.send_message.side_effect = None
         api.edit_message_text.side_effect = BadRequest("Message to edit not found")
-        await bot.refresh(api, bot.store.get(1), now)
-        assert bot.store.get(1).status_id == 100
-        assert bot.store.get(1).alert_level == 2
+        await bot.refresh(api, await bot.store.get(1), now)
+        assert bot.store.peek(1).status_id == 100
+        assert bot.store.peek(1).alert_level == 2
 
     asyncio.run(run())
 
 
 def test_blocked_user_is_removed_without_stopping_other_users(rig):
     bot, _, api, context = rig
-    bot.store.save(active(time.time(), attempted_at=time.time()))
+    bot.store.data[1] = active(time.time(), attempted_at=time.time())
     api.send_message.side_effect = Forbidden("blocked")
-    asyncio.run(bot.tick(context))
-    assert bot.store.get(1) is None
+    asyncio.run(bot.tick(api, 1))
+    assert bot.store.peek(1) is None
 
 
 @pytest.mark.parametrize("offline", [False, True])
@@ -288,14 +304,14 @@ def test_expired_trip_is_removed(rig, offline):
     bot, routes, api, _ = rig
     now = time.time()
     trip = active(now)
-    bot.store.save(trip)
+    bot.store.data[1] = trip
     if offline:
         api.send_message.side_effect = NetworkError("offline")
         with pytest.raises(NetworkError):
             asyncio.run(bot.refresh(api, trip, trip.deadline))
     else:
         asyncio.run(bot.refresh(api, trip, trip.deadline))
-    assert bot.store.get(1) is None
+    assert bot.store.peek(1) is None
     routes.calculate.assert_not_awaited()
 
 

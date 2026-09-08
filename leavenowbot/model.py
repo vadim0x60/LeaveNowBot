@@ -29,6 +29,7 @@ class Trip:
     alert_level: int = 0
     status_id: int | None = None
     status_text: str = ""
+    task_token: str = ""
 
     def stale(self, now: float) -> bool:
         return now - self.location_at > 300 or now >= self.live_until

@@ -1,6 +1,6 @@
 # ADR 0001: Telegram bot with explicit arrival time
 
-Status: Accepted for V0
+Status: Superseded by [ADR 0002](0002-google-cloud-scale-to-zero.md)
 
 ## Context
 

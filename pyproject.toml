@@ -3,10 +3,17 @@ name = "leavenowbot"
 version = "0.1.0"
 description = "Telegram live-location transit departure reminders"
 requires-python = ">=3.11"
-dependencies = ["python-telegram-bot[job-queue]>=22.5,<23", "httpx>=0.28,<0.29"]
+dependencies = [
+    "google-cloud-firestore>=2.21,<3",
+    "google-cloud-tasks>=2.20,<3",
+    "httpx>=0.28,<0.29",
+    "python-telegram-bot>=22.5,<23",
+    "starlette>=0.47,<1",
+    "uvicorn>=0.35,<1",
+]
 
 [project.scripts]
-leavenowbot = "leavenowbot.app:main"
+leavenowbot = "leavenowbot.web:main"
 
 [build-system]
 requires = ["hatchling"]

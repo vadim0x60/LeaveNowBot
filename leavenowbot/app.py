@@ -1,16 +1,14 @@
 import asyncio
 import logging
 import math
-import os
 import time
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
-import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, TelegramError
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import CommandHandler, MessageHandler, filters
 
 from leavenowbot.model import Trip, parse_arrival, route_due
 from leavenowbot.routes import GoogleRoutes, RouteUnavailable
@@ -59,7 +57,7 @@ def links(trip: Trip) -> InlineKeyboardMarkup:
 class Bot:
     def __init__(self, store: Store, routes: GoogleRoutes, allowed: set[int], timezone: ZoneInfo):
         self.store, self.routes, self.allowed, self.timezone = store, routes, allowed, timezone
-        # Serialize timer and message updates so stale snapshots cannot overwrite /cancel or GPS.
+        # Serialize task and message updates so stale snapshots cannot overwrite /cancel or GPS.
         self.lock = asyncio.Lock()
 
     def authorized(self, update: Update) -> bool:
@@ -130,7 +128,7 @@ class Bot:
             message = await api.send_message(trip.chat_id, text, reply_markup=links(trip))
             trip.status_id = message.message_id
         trip.status_text = text
-        self.store.save(trip)
+        await self.store.save(trip)
 
     async def refresh(self, api, trip: Trip, now: float) -> None:
         if trip.phase != "tracking":
@@ -141,7 +139,7 @@ class Bot:
                     api, trip, "Arrival deadline reached. Tracking ended; saved location deleted."
                 )
             finally:
-                self.store.delete(trip.chat_id)
+                await self.store.delete(trip.chat_id)
             return
         if route_due(trip, now):
             trip.attempted_at = now
@@ -153,7 +151,7 @@ class Bot:
                 trip.warning = ""
             except RouteUnavailable as error:
                 trip.warning = str(error)
-            self.store.save(trip)
+            await self.store.save(trip)
 
         warning = (
             "Location stale or sharing ended. Share a fresh location; check your route manually."
@@ -163,7 +161,7 @@ class Bot:
         if warning and warning != trip.notified_warning:
             await api.send_message(trip.chat_id, f"⚠️ {warning}", reply_markup=links(trip))
         trip.notified_warning = warning
-        self.store.save(trip)
+        await self.store.save(trip)
 
         if trip.leave_at is not None:
             slack = trip.leave_at - now
@@ -177,7 +175,7 @@ class Bot:
                     reply_markup=links(trip),
                 )
                 trip.alert_level = level
-                self.store.save(trip)
+                await self.store.save(trip)
         await self.publish(api, trip, self.render(trip, now))
 
     async def command(self, update: Update, context) -> None:
@@ -195,14 +193,14 @@ class Bot:
                 return
             chat_id = update.effective_chat.id
             if name == "/cancel":
-                self.store.delete(chat_id)
+                await self.store.delete(chat_id)
                 await message.reply_text("Tracking cancelled; saved trip and location deleted.")
                 return
             if name == "/trip":
-                self.store.save(Trip(chat_id, location_message_id=message.message_id))
+                await self.store.save(Trip(chat_id, location_message_id=message.message_id))
                 await message.reply_text("Send a destination pin.")
                 return
-            trip = self.store.get(chat_id)
+            trip = await self.store.get(chat_id)
             if trip is None or trip.phase == "destination":
                 await message.reply_text("Send a destination pin to begin.")
                 return
@@ -218,7 +216,7 @@ class Bot:
             return
         message = update.effective_message
         async with self.lock:
-            trip = self.store.get(update.effective_chat.id)
+            trip = await self.store.get(update.effective_chat.id)
             if trip is None or trip.phase == "destination":
                 await message.reply_text("Send a destination pin first.")
                 return
@@ -233,7 +231,7 @@ class Bot:
             trip.phase = "tracking"
             # Ignore edits to the destination pin and any earlier live-location messages.
             trip.location_message_id = message.message_id
-            self.store.save(trip)
+            await self.store.save(trip)
             await self.refresh(context.bot, trip, time.time())
 
     async def location(self, update: Update, context) -> None:
@@ -241,7 +239,7 @@ class Bot:
             return
         message = update.effective_message
         async with self.lock:
-            trip = self.store.get(update.effective_chat.id)
+            trip = await self.store.get(update.effective_chat.id)
             location = message.location or message.venue.location
             if trip is None:
                 if update.edited_message:
@@ -262,7 +260,7 @@ class Bot:
                 trip.label = message.venue.title[:120] if message.venue else "Your destination"
                 trip.phase = "time"
                 trip.location_message_id = message.message_id
-                self.store.save(trip)
+                await self.store.save(trip)
                 await message.reply_text(
                     f"What time should you be there? HH:MM, in {self.timezone}."
                 )
@@ -279,65 +277,29 @@ class Bot:
             # An edited location with no live_period indicates sharing was stopped.
             if update.edited_message and not period:
                 trip.live_until = at
-            self.store.save(trip)
+            await self.store.save(trip)
             await self.refresh(context.bot, trip, time.time())
 
-    async def tick(self, context) -> None:
+    async def tick(self, api, chat_id: int) -> None:
         async with self.lock:
-            for trip in self.store.all():
-                if trip.chat_id not in self.allowed:
-                    self.store.delete(trip.chat_id)
-                    continue
-                try:
-                    await self.refresh(context.bot, trip, time.time())
-                except Forbidden:
-                    self.store.delete(trip.chat_id)
-                except TelegramError:
-                    LOG.warning("Telegram delivery failed; will retry on next timer tick")
+            trip = await self.store.get(chat_id)
+            if trip is None:
+                return
+            if trip.chat_id not in self.allowed:
+                await self.store.delete(trip.chat_id)
+                return
+            try:
+                await self.refresh(api, trip, time.time())
+            except Forbidden:
+                await self.store.delete(trip.chat_id)
+            except TelegramError:
+                LOG.warning("Telegram delivery failed; Cloud Tasks will retry")
+                raise
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.WARNING)
-    # HTTP client logs include Telegram tokens in URL paths.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
-    try:
-        allowed = {int(v.strip()) for v in os.environ.get("ALLOWED_USER_IDS", "").split(",")}
-        if not allowed or any(v <= 0 for v in allowed):
-            raise ValueError
-    except ValueError:
-        raise SystemExit(
-            "Set ALLOWED_USER_IDS to comma-separated positive Telegram user IDs."
-        ) from None
-    if not token or not key:
-        raise SystemExit("TELEGRAM_BOT_TOKEN and GOOGLE_MAPS_API_KEY are required.")
-    timezone = ZoneInfo(os.environ.get("BOT_TIMEZONE", "Europe/London"))
-    # Location database and directory are private to the service user.
-    os.umask(0o077)
-    store = Store(os.environ.get("DATABASE_PATH", "data/bot.sqlite3"))
-    client = httpx.AsyncClient(timeout=20)
-    bot = Bot(store, GoogleRoutes(key, client), allowed, timezone)
-
-    async def shutdown(application):
-        await client.aclose()
-        store.close()
-
-    async def error_handler(update, context):
-        LOG.warning("Update failed (%s); sensitive details omitted", type(context.error).__name__)
-
-    application = Application.builder().token(token).post_shutdown(shutdown).build()
+def add_handlers(application, bot: Bot) -> None:
     application.add_handler(
         CommandHandler(["start", "help", "trip", "status", "cancel"], bot.command)
     )
     application.add_handler(MessageHandler(filters.LOCATION | filters.VENUE, bot.location))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.arrival))
-    application.add_error_handler(error_handler)
-    application.job_queue.run_repeating(bot.tick, interval=30, first=1)
-    application.run_polling(
-        allowed_updates=["message", "edited_message"], drop_pending_updates=False
-    )
-
-
-if __name__ == "__main__":
-    main()

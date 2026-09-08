@@ -4,7 +4,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from leavenowbot.model import Trip, distance_m, parse_arrival, route_due
-from leavenowbot.store import Store
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -64,18 +63,3 @@ def test_routing_cadence_and_movement_boundaries():
     trip.live_until = 1030
     assert not route_due(trip, 1030)  # expired sharing, despite fresh coordinates
     assert 333 < distance_m(51, 0, 51.003, 0) < 334
-
-
-def test_store_survives_restart_and_isolates_users(tmp_path):
-    path = str(tmp_path / "state.sqlite3")
-    store = Store(path)
-    trip = Trip(1, phase="tracking", origin_lat=51.5, origin_lon=-0.12, alert_level=1, status_id=42)
-    store.save(trip)
-    store.save(Trip(2, phase="time"))
-    store.close()
-    store = Store(path)
-    assert store.get(1) == trip
-    store.delete(1)
-    assert store.get(1) is None
-    assert [t.chat_id for t in store.all()] == [2]
-    store.close()
