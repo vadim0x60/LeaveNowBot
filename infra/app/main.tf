@@ -40,8 +40,13 @@ resource "google_cloud_run_v2_service" "app" {
         value = var.project_id
       }
       env {
-        name  = "ALLOWED_USER_IDS"
-        value = var.allowed_user_ids
+        name = "ALLOWED_USER_IDS"
+        value_source {
+          secret_key_ref {
+            secret  = "leavenowbot-allowed-user-ids"
+            version = "latest"
+          }
+        }
       }
       env {
         name  = "BOT_TIMEZONE"

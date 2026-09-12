@@ -7,11 +7,6 @@ variable "image" {
   type        = string
 }
 
-variable "allowed_user_ids" {
-  description = "Comma-separated numeric Telegram user IDs."
-  type        = string
-}
-
 variable "region" {
   type    = string
   default = "europe-west2"

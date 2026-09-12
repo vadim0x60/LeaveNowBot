@@ -36,13 +36,17 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
       - id: auth
         uses: google-github-actions/auth@v3
         with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v3
 
@@ -68,37 +72,9 @@ jobs:
           terraform -chdir=infra/bootstrap apply \
             -var="project_id=${PROJECT_ID}" \
             -var="region=${REGION}" \
+            -var="github_repository=${GITHUB_REPOSITORY}" \
             -auto-approve \
             -input=false
-
-      - name: Initialize application secrets
-        env:
-          PROJECT_ID: ${{ steps.auth.outputs.project_id }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
-          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
-        run: |
-          set -euo pipefail
-          : "${TELEGRAM_BOT_TOKEN:?Missing TELEGRAM_BOT_TOKEN GitHub secret}"
-          : "${GOOGLE_MAPS_API_KEY:?Missing GOOGLE_MAPS_API_KEY GitHub secret}"
-          : "${TELEGRAM_WEBHOOK_SECRET:?Missing TELEGRAM_WEBHOOK_SECRET GitHub secret}"
-
-          add_initial_version() {
-            local name="$1" value="$2"
-            if [[ -z "$(gcloud secrets versions list "${name}" \
-              --project "${PROJECT_ID}" \
-              --filter='state=ENABLED' \
-              --limit=1 \
-              --format='value(name)')" ]]; then
-              printf %s "${value}" | gcloud secrets versions add "${name}" \
-                --project "${PROJECT_ID}" \
-                --data-file=-
-            fi
-          }
-
-          add_initial_version leavenowbot-telegram-token "${TELEGRAM_BOT_TOKEN}"
-          add_initial_version leavenowbot-maps-api-key "${GOOGLE_MAPS_API_KEY}"
-          add_initial_version leavenowbot-webhook-secret "${TELEGRAM_WEBHOOK_SECRET}"
 
       - name: Build and push image
         env:
@@ -114,10 +90,8 @@ jobs:
       - name: Deploy application
         env:
           PROJECT_ID: ${{ steps.auth.outputs.project_id }}
-          ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
         run: |
           set -euo pipefail
-          : "${ALLOWED_USER_IDS:?Missing ALLOWED_USER_IDS GitHub secret}"
           STATE_BUCKET="${PROJECT_ID}-leavenowbot-tfstate"
           terraform -chdir=infra/app init \
             -backend-config="bucket=${STATE_BUCKET}" \
@@ -126,7 +100,6 @@ jobs:
             -var="project_id=${PROJECT_ID}" \
             -var="region=${REGION}" \
             -var="image=${IMAGE}" \
-            -var="allowed_user_ids=${ALLOWED_USER_IDS}" \
             -auto-approve \
             -input=false
           SERVICE_URL="$(terraform -chdir=infra/app output -raw service_url)"

@@ -8,3 +8,9 @@ variable "region" {
   type        = string
   default     = "europe-west2"
 }
+
+variable "github_repository" {
+  description = "GitHub repository allowed to deploy, in owner/name form."
+  type        = string
+  default     = "vadim0x60/LeaveNowBot"
+}

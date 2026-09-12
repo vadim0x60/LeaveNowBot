@@ -25,53 +25,28 @@ Cloud Run has zero minimum instances, one maximum instance, and a request concur
 
 ## Deploy to Google Cloud
 
-The GitHub Actions workflow handles the first deployment as well as later updates. It creates remote Terraform state, provisions the Google Cloud infrastructure, initializes the application secrets, builds the image, deploys Cloud Run, checks `/healthz`, and registers the Telegram webhook. It runs on every push to `master` and can also be started manually from GitHub’s Actions page.
+You need:
 
-The only infrastructure prerequisite is a billing-enabled Google Cloud project and a service-account credential authorized to provision resources in it. From an account with project-owner access, install `gcloud` and `gh`, then run:
+* a billing-enabled Google Cloud project with Owner-equivalent access;
+* a Telegram BotFather token and your numeric Telegram user ID; and
+* a Google Routes API key.
 
-```sh
-export PROJECT_ID=your-project-id
-gcloud config set project "$PROJECT_ID"
-export DEPLOYER="leavenowbot-github@${PROJECT_ID}.iam.gserviceaccount.com"
-gcloud iam service-accounts create leavenowbot-github \
-  --display-name="LeaveNowBot GitHub deployer"
-for ROLE in \
-  roles/artifactregistry.admin \
-  roles/cloudtasks.admin \
-  roles/datastore.owner \
-  roles/iam.serviceAccountAdmin \
-  roles/iam.serviceAccountUser \
-  roles/resourcemanager.projectIamAdmin \
-  roles/run.admin \
-  roles/secretmanager.admin \
-  roles/secretmanager.secretAccessor \
-  roles/serviceusage.serviceUsageAdmin \
-  roles/storage.admin; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${DEPLOYER}" --role="$ROLE"
-done
-```
+> **Choose the region first:** Firestore’s location is permanent. Setup defaults to London (`europe-west2`). Follow the [region instructions](docs/deployment.md#browser-first-setup) before initial setup to use another region.
 
-Create a key and add the five required repository secrets:
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2Fvadim0x60%2FLeaveNowBot&cloudshell_git_branch=master&cloudshell_tutorial=docs%2Fcloud-shell-tutorial.md)
 
-```sh
-gcloud iam service-accounts keys create github-key.json --iam-account="$DEPLOYER"
-gh secret set GCP_CREDENTIALS < github-key.json
-rm github-key.json
-gh secret set TELEGRAM_BOT_TOKEN
-gh secret set GOOGLE_MAPS_API_KEY
-python -c 'import secrets; print(secrets.token_urlsafe(32), end="")' | \
-  gh secret set TELEGRAM_WEBHOOK_SECRET
-gh secret set ALLOWED_USER_IDS
-```
+1. Select the Google Cloud project.
+2. Click **Run in Cloud Shell** in the tutorial.
+3. Enter the three application values when prompted; input is hidden.
+4. Copy the two non-secret setup outputs into the linked GitHub Actions variables page.
 
-Enter the BotFather token, Google Routes API key, and comma-separated numeric Telegram user IDs when prompted. The project ID is read from `GCP_CREDENTIALS`. Application secrets are copied into Google Secret Manager only when the corresponding cloud secret has no enabled version; later deployments do not create duplicate versions.
+The Google-hosted browser session uses your account to create remote Terraform state and infrastructure, put application values in Secret Manager, configure Workload Identity Federation, deploy Cloud Run, check `/healthz`, and register the Telegram webhook. No service-account key is created or downloaded, and rerunning setup retains existing application values.
 
-Treat `GCP_CREDENTIALS` like a password and rotate it immediately if exposed. The provisioning credential is necessarily powerful because a first deployment must enable APIs, create service accounts, and grant their IAM roles. For an established deployment, it can be replaced with a narrower deploy-only identity.
-
-Firestore’s region is permanent. The workflow defaults to London (`europe-west2`); change `REGION` in `.github/workflows/deploy.yml` before the first run if needed.
+After setup, pushes to `master` test and deploy automatically. GitHub exchanges its OIDC token for short-lived Google credentials and can authenticate only for this repository’s `master` ref. Pull requests run no production deployment workflow.
 
 Cloud Run is publicly reachable because Telegram cannot authenticate with Google IAM. The `/telegram` endpoint still requires Telegram’s secret header, and `/tasks/check` verifies the Cloud Tasks OIDC identity. The `/healthz` endpoint contains no data.
+
+See [deployment details and migration instructions](docs/deployment.md) for an existing installation or a non-default repository/region.
 
 ## How estimates behave
 

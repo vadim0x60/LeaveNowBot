@@ -10,9 +10,26 @@ locals {
     "cloudtasks.googleapis.com",
     "firestore.googleapis.com",
     "iam.googleapis.com",
+    "iamcredentials.googleapis.com",
     "routes.googleapis.com",
     "run.googleapis.com",
     "secretmanager.googleapis.com",
+    "sts.googleapis.com",
+  ])
+
+  deployer_roles = toset([
+    "roles/artifactregistry.admin",
+    "roles/cloudtasks.admin",
+    "roles/datastore.owner",
+    "roles/iam.serviceAccountAdmin",
+    "roles/iam.serviceAccountUser",
+    "roles/iam.workloadIdentityPoolAdmin",
+    "roles/resourcemanager.projectIamAdmin",
+    "roles/run.admin",
+    "roles/secretmanager.admin",
+    "roles/secretmanager.secretAccessor",
+    "roles/serviceusage.serviceUsageAdmin",
+    "roles/storage.admin",
   ])
 }
 
@@ -77,6 +94,51 @@ resource "google_service_account" "build" {
   depends_on   = [google_project_service.services]
 }
 
+resource "google_service_account" "deployer" {
+  account_id   = "leavenowbot-github"
+  display_name = "LeaveNowBot GitHub deployer"
+  depends_on   = [google_project_service.services]
+}
+
+resource "google_project_iam_member" "deployer" {
+  for_each = local.deployer_roles
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_iam_workload_identity_pool" "github" {
+  workload_identity_pool_id = "leavenowbot-github"
+  display_name              = "LeaveNowBot GitHub Actions"
+  description               = "Short-lived deployment identities for ${var.github_repository}."
+  depends_on                = [google_project_service.services]
+}
+
+resource "google_iam_workload_identity_pool_provider" "github" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github"
+  display_name                       = "GitHub Actions"
+  description                        = "Trusts master workflows in ${var.github_repository}."
+
+  attribute_mapping = {
+    "google.subject"             = "assertion.sub"
+    "attribute.repository"       = "assertion.repository"
+    "attribute.repository_owner" = "assertion.repository_owner"
+    "attribute.ref"              = "assertion.ref"
+  }
+  attribute_condition = "assertion.repository == '${var.github_repository}' && assertion.ref == 'refs/heads/master'"
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+resource "google_service_account_iam_member" "github_deployer" {
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
+}
+
 resource "google_project_iam_member" "runtime_firestore" {
   project = var.project_id
   role    = "roles/datastore.user"
@@ -108,7 +170,7 @@ resource "google_project_iam_member" "build_logs" {
 }
 
 resource "google_secret_manager_secret" "secrets" {
-  for_each  = toset(["telegram-token", "maps-api-key", "webhook-secret"])
+  for_each  = toset(["telegram-token", "maps-api-key", "webhook-secret", "allowed-user-ids"])
   secret_id = "leavenowbot-${each.value}"
   replication {
     auto {}
