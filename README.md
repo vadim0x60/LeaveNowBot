@@ -25,89 +25,53 @@ Cloud Run has zero minimum instances, one maximum instance, and a request concur
 
 ## Deploy to Google Cloud
 
-Prerequisites: a billing-enabled Google Cloud project, `gcloud`, Terraform 1.7+, Python 3.11+, a Telegram bot token, a Google Routes API key, and your numeric Telegram user ID.
+The GitHub Actions workflow handles the first deployment as well as later updates. It creates remote Terraform state, provisions the Google Cloud infrastructure, initializes the application secrets, builds the image, deploys Cloud Run, checks `/healthz`, and registers the Telegram webhook. It runs on every push to `master` and can also be started manually from GitHub’s Actions page.
 
-Authenticate Application Default Credentials and select the project:
+The only infrastructure prerequisite is a billing-enabled Google Cloud project and a service-account credential authorized to provision resources in it. From an account with project-owner access, install `gcloud` and `gh`, then run:
 
 ```sh
-gcloud auth application-default login
 export PROJECT_ID=your-project-id
 gcloud config set project "$PROJECT_ID"
-```
-
-Bootstrap APIs, Firestore, Cloud Tasks, Artifact Registry, Secret Manager, and least-privilege service accounts:
-
-```sh
-terraform -chdir=infra/bootstrap init
-terraform -chdir=infra/bootstrap apply -var "project_id=$PROJECT_ID"
-```
-
-Firestore’s region is permanent. The default is London (`europe-west2`); pass the same `-var region=...` to both Terraform roots if changing it.
-
-Add secret versions without placing values in Terraform state or shell history:
-
-```sh
-read -rsp 'Telegram bot token: ' VALUE; printf %s "$VALUE" | \
-  gcloud secrets versions add leavenowbot-telegram-token --data-file=-; unset VALUE
-read -rsp 'Google Routes API key: ' VALUE; printf %s "$VALUE" | \
-  gcloud secrets versions add leavenowbot-maps-api-key --data-file=-; unset VALUE
-python -c 'import secrets; print(secrets.token_urlsafe(32), end="")' | \
-  gcloud secrets versions add leavenowbot-webhook-secret --data-file=-
-```
-
-Build the image with Cloud Build:
-
-```sh
-export IMAGE="$(terraform -chdir=infra/bootstrap output -raw image_repository):$(git rev-parse --short HEAD)"
-gcloud builds submit --config cloudbuild.yaml --substitutions "_IMAGE=$IMAGE" .
-```
-
-Deploy Cloud Run. Replace the example allowlist with comma-separated Telegram user IDs:
-
-```sh
-terraform -chdir=infra/app init
-terraform -chdir=infra/app apply \
-  -var "project_id=$PROJECT_ID" \
-  -var "image=$IMAGE" \
-  -var 'allowed_user_ids=123456789'
-export SERVICE_URL="$(terraform -chdir=infra/app output -raw service_url)"
-python scripts/set_webhook.py --project "$PROJECT_ID" --service-url "$SERVICE_URL"
-```
-
-Cloud Run is publicly reachable because Telegram cannot authenticate with Google IAM. The `/telegram` endpoint still requires Telegram’s secret header, and `/tasks/check` verifies the Cloud Tasks OIDC identity. The `/healthz` endpoint contains no data.
-
-### Automatic deployments from GitHub
-
-After the one-time infrastructure deployment above, every push to `master` runs the tests, builds an image, deploys it to Cloud Run, checks `/healthz`, and refreshes the Telegram webhook. The workflow can also be started manually from GitHub’s Actions page.
-
-Create a dedicated deployer service account and grant only the permissions used by the workflow:
-
-```sh
 export DEPLOYER="leavenowbot-github@${PROJECT_ID}.iam.gserviceaccount.com"
 gcloud iam service-accounts create leavenowbot-github \
   --display-name="LeaveNowBot GitHub deployer"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${DEPLOYER}" --role=roles/artifactregistry.writer
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${DEPLOYER}" --role=roles/run.developer
-gcloud iam service-accounts add-iam-policy-binding \
-  "leavenowbot-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --member="serviceAccount:${DEPLOYER}" --role=roles/iam.serviceAccountUser
-for SECRET in leavenowbot-telegram-token leavenowbot-webhook-secret; do
-  gcloud secrets add-iam-policy-binding "$SECRET" \
-    --member="serviceAccount:${DEPLOYER}" --role=roles/secretmanager.secretAccessor
+for ROLE in \
+  roles/artifactregistry.admin \
+  roles/cloudtasks.admin \
+  roles/datastore.owner \
+  roles/iam.serviceAccountAdmin \
+  roles/iam.serviceAccountUser \
+  roles/resourcemanager.projectIamAdmin \
+  roles/run.admin \
+  roles/secretmanager.admin \
+  roles/secretmanager.secretAccessor \
+  roles/serviceusage.serviceUsageAdmin \
+  roles/storage.admin; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${DEPLOYER}" --role="$ROLE"
 done
 ```
 
-Create a key and save its entire JSON contents as the repository secret `GCP_CREDENTIALS` in **Settings → Secrets and variables → Actions**:
+Create a key and add the five required repository secrets:
 
 ```sh
 gcloud iam service-accounts keys create github-key.json --iam-account="$DEPLOYER"
 gh secret set GCP_CREDENTIALS < github-key.json
 rm github-key.json
+gh secret set TELEGRAM_BOT_TOKEN
+gh secret set GOOGLE_MAPS_API_KEY
+python -c 'import secrets; print(secrets.token_urlsafe(32), end="")' | \
+  gh secret set TELEGRAM_WEBHOOK_SECRET
+gh secret set ALLOWED_USER_IDS
 ```
 
-The project ID is read from that credential, so no second GitHub secret is needed. Treat the credential like a password; rotate it immediately if it is exposed. The application’s Telegram and Maps values remain in Google Secret Manager and are not copied into GitHub.
+Enter the BotFather token, Google Routes API key, and comma-separated numeric Telegram user IDs when prompted. The project ID is read from `GCP_CREDENTIALS`. Application secrets are copied into Google Secret Manager only when the corresponding cloud secret has no enabled version; later deployments do not create duplicate versions.
+
+Treat `GCP_CREDENTIALS` like a password and rotate it immediately if exposed. The provisioning credential is necessarily powerful because a first deployment must enable APIs, create service accounts, and grant their IAM roles. For an established deployment, it can be replaced with a narrower deploy-only identity.
+
+Firestore’s region is permanent. The workflow defaults to London (`europe-west2`); change `REGION` in `.github/workflows/deploy.yml` before the first run if needed.
+
+Cloud Run is publicly reachable because Telegram cannot authenticate with Google IAM. The `/telegram` endpoint still requires Telegram’s secret header, and `/tasks/check` verifies the Cloud Tasks OIDC identity. The `/healthz` endpoint contains no data.
 
 ## How estimates behave
 
