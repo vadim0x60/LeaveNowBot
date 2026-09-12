@@ -76,6 +76,39 @@ python scripts/set_webhook.py --project "$PROJECT_ID" --service-url "$SERVICE_UR
 
 Cloud Run is publicly reachable because Telegram cannot authenticate with Google IAM. The `/telegram` endpoint still requires Telegram’s secret header, and `/tasks/check` verifies the Cloud Tasks OIDC identity. The `/healthz` endpoint contains no data.
 
+### Automatic deployments from GitHub
+
+After the one-time infrastructure deployment above, every push to `master` runs the tests, builds an image, deploys it to Cloud Run, checks `/healthz`, and refreshes the Telegram webhook. The workflow can also be started manually from GitHub’s Actions page.
+
+Create a dedicated deployer service account and grant only the permissions used by the workflow:
+
+```sh
+export DEPLOYER="leavenowbot-github@${PROJECT_ID}.iam.gserviceaccount.com"
+gcloud iam service-accounts create leavenowbot-github \
+  --display-name="LeaveNowBot GitHub deployer"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DEPLOYER}" --role=roles/artifactregistry.writer
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DEPLOYER}" --role=roles/run.developer
+gcloud iam service-accounts add-iam-policy-binding \
+  "leavenowbot-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --member="serviceAccount:${DEPLOYER}" --role=roles/iam.serviceAccountUser
+for SECRET in leavenowbot-telegram-token leavenowbot-webhook-secret; do
+  gcloud secrets add-iam-policy-binding "$SECRET" \
+    --member="serviceAccount:${DEPLOYER}" --role=roles/secretmanager.secretAccessor
+done
+```
+
+Create a key and save its entire JSON contents as the repository secret `GCP_CREDENTIALS` in **Settings → Secrets and variables → Actions**:
+
+```sh
+gcloud iam service-accounts keys create github-key.json --iam-account="$DEPLOYER"
+gh secret set GCP_CREDENTIALS < github-key.json
+rm github-key.json
+```
+
+The project ID is read from that credential, so no second GitHub secret is needed. Treat the credential like a password; rotate it immediately if it is exposed. The application’s Telegram and Maps values remain in Google Secret Manager and are not copied into GitHub.
+
 ## How estimates behave
 
 The bot queries Google Routes for transit routes arriving by the deadline. Departure is the first boarding time minus the walk to the stop; arrival includes the walk from the final stop. The bot chooses the latest departure among returned routes that meet the deadline. Walking-only routes are supported.
