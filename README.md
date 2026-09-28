@@ -28,25 +28,27 @@ Cloud Run has zero minimum instances, one maximum instance, and a request concur
 You need:
 
 * a billing-enabled Google Cloud project with Owner-equivalent access;
-* a Telegram BotFather token and your numeric Telegram user ID; and
-* a Google Routes API key.
+* a Telegram BotFather token; and
+* `gcloud`, `curl`, and Python 3 (all are preinstalled in Cloud Shell).
 
-> **Choose the region first:** Firestore’s location is permanent. Setup defaults to London (`europe-west2`). Follow the [region instructions](docs/deployment.md#browser-first-setup) before initial setup to use another region.
+> **Choose the region first:** Firestore’s location is permanent. Deployment defaults to London (`europe-west2`). Set `REGION` on the first run to use another region.
 
-[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2Fvadim0x60%2FLeaveNowBot&cloudshell_git_branch=master&cloudshell_tutorial=docs%2Fcloud-shell-tutorial.md)
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2Fvadim0x60%2FLeaveNowBot&cloudshell_git_branch=master&cloudshell_print=.%2Fdeploy.sh)
 
-1. Select the Google Cloud project.
-2. Click **Run in Cloud Shell** in the tutorial.
-3. Enter the three application values when prompted; input is hidden.
-4. Copy the two non-secret setup outputs into the linked GitHub Actions variables page.
+Select the project and run the one deployment command:
 
-The Google-hosted browser session uses your account to create remote Terraform state and infrastructure, put application values in Secret Manager, configure Workload Identity Federation, deploy Cloud Run, check `/healthz`, and register the Telegram webhook. No service-account key is created or downloaded, and rerunning setup retains existing application values.
+```sh
+gcloud config set project PROJECT_ID
+./deploy.sh
+```
 
-After setup, pushes to `master` test and deploy automatically. GitHub exchanges its OIDC token for short-lived Google credentials and can authenticate only for this repository’s `master` ref. Pull requests run no production deployment workflow.
+The script asks only for the BotFather token, with input hidden. It creates a Routes-restricted API key and a random webhook secret. When prompted, send `/start` to the bot; the script reads your numeric user ID from Telegram before registering the webhook. It then provisions the Google Cloud resources, deploys from the existing Dockerfile, checks `/healthz`, and registers the webhook.
+
+Use the same `./deploy.sh` command for updates. Existing Firestore data and enabled Secret Manager values are retained. GitHub Actions runs tests and lint only; it does not deploy.
 
 Cloud Run is publicly reachable because Telegram cannot authenticate with Google IAM. The `/telegram` endpoint still requires Telegram’s secret header, and `/tasks/check` verifies the Cloud Tasks OIDC identity. The `/healthz` endpoint contains no data.
 
-See [deployment details and migration instructions](docs/deployment.md) for an existing installation or a non-default repository/region.
+See [deployment details](docs/deployment.md) for region, secret-update, existing-installation, and non-interactive options.
 
 ## How estimates behave
 
@@ -69,4 +71,4 @@ uv run ruff format --check
 
 Tests use in-memory fakes and do not call Telegram, Google Routes, Firestore, or Cloud Tasks. Before relying on the bot, test a real phone by setting a nearby destination, sharing live location, backgrounding Telegram, and walking for five minutes.
 
-Architecture decisions: [ADR 0001](docs/adr/0001-telegram-transit-bot.md) and [ADR 0002](docs/adr/0002-google-cloud-scale-to-zero.md).
+Architecture decisions: [ADR 0001](docs/adr/0001-telegram-transit-bot.md), [ADR 0002](docs/adr/0002-google-cloud-scale-to-zero.md), and [ADR 0003](docs/adr/0003-single-command-google-cloud-deployment.md).

@@ -1,6 +1,6 @@
 # ADR 0002: Scale to zero on Google Cloud
 
-Status: Accepted
+Status: Accepted; deployment mechanism and build identity superseded by [ADR 0003](0003-single-command-google-cloud-deployment.md)
 
 ## Context
 

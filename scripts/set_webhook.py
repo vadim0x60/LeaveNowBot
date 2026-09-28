@@ -2,6 +2,7 @@
 import argparse
 import json
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -46,8 +47,13 @@ def main() -> None:
         data=data,
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        result = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as error:
+        raise SystemExit(f"Telegram webhook registration failed with HTTP {error.code}.") from None
+    except urllib.error.URLError:
+        raise SystemExit("Telegram webhook registration could not connect.") from None
     if not result.get("ok"):
         raise SystemExit("Telegram rejected the webhook registration.")
     print("Telegram webhook registered.")

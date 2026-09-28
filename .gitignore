@@ -7,7 +7,3 @@ __pycache__/
 *.egg-info/
 data/
 .amp/
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfplan
